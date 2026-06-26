@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Messaging MVP</title>
+  <style>
+    :root { color-scheme: light; font-family: system-ui, sans-serif; background: #f5f7fb; color: #172033; }
+    body { max-width: 1100px; margin: 0 auto; padding: 2rem 1rem; }
+    h1 { margin-bottom: .25rem; }
+    .subtitle { color: #5e6a80; margin-top: 0; }
+    .card { background: white; border: 1px solid #dce2ec; border-radius: 12px; padding: 1rem; margin: 1rem 0; box-shadow: 0 3px 12px #2030500d; }
+    .row { display: flex; gap: .75rem; flex-wrap: wrap; align-items: end; }
+    label { display: grid; gap: .35rem; font-weight: 600; flex: 1; min-width: 180px; }
+    input, textarea, button { font: inherit; }
+    input, textarea { padding: .65rem; border: 1px solid #aeb8c8; border-radius: 7px; }
+    textarea { min-height: 70px; resize: vertical; }
+    button { border: 0; border-radius: 7px; padding: .7rem 1rem; background: #3157d5; color: white; cursor: pointer; }
+    button.secondary { background: #596579; }
+    button:disabled { opacity: .55; cursor: not-allowed; }
+    .status { display: inline-block; margin-left: .5rem; padding: .2rem .5rem; border-radius: 999px; background: #e9edf4; }
+    .status.online { color: #126335; background: #dff7e8; }
+    .logs { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+    pre { min-height: 220px; max-height: 420px; overflow: auto; background: #111827; color: #d7e0f0; border-radius: 8px; padding: .8rem; white-space: pre-wrap; word-break: break-word; }
+    @media (max-width: 750px) { .logs { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <h1>Notification & Messaging MVP</h1>
+  <p class="subtitle">Open two tabs, connect each as a different user, and watch delivery happen.</p>
+
+  <section class="card">
+    <div class="row">
+      <label>Current user ID <input id="currentUserId" type="number" min="1" value="1"></label>
+      <button id="connectButton">Connect</button>
+      <span id="connectionStatus" class="status">Disconnected</span>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="row">
+      <label>Receiver ID <input id="receiverId" type="number" min="1" value="2"></label>
+      <label>Message <textarea id="content" placeholder="Write a message..."></textarea></label>
+      <button id="sendButton">Send Message</button>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="row">
+      <button id="messagesButton" class="secondary">Fetch Messages</button>
+      <button id="notificationsButton" class="secondary">Fetch Notifications</button>
+      <button id="clearButton" class="secondary">Clear Logs</button>
+    </div>
+  </section>
+
+  <div class="logs">
+    <section><h2>WebSocket events</h2><pre id="wsLog"></pre></section>
+    <section><h2>API responses</h2><pre id="apiLog"></pre></section>
+  </div>
+
+  <script>
+    let socket = null;
+    const byId = (id) => document.getElementById(id);
+    const currentUserId = () => Number(byId("currentUserId").value);
+    const appendLog = (target, label, data) => {
+      const time = new Date().toLocaleTimeString();
+      target.textContent += `[${time}] ${label}\n${JSON.stringify(data, null, 2)}\n\n`;
+      target.scrollTop = target.scrollHeight;
+    };
+    const logWs = (label, data) => appendLog(byId("wsLog"), label, data);
+    const logApi = (label, data) => appendLog(byId("apiLog"), label, data);
+
+    function setConnection(connected) {
+      byId("connectionStatus").textContent = connected ? `Connected as user ${currentUserId()}` : "Disconnected";
+      byId("connectionStatus").classList.toggle("online", connected);
+      byId("connectButton").textContent = connected ? "Disconnect" : "Connect";
+    }
+
+    byId("connectButton").addEventListener("click", () => {
+      if (socket && socket.readyState <= WebSocket.OPEN) {
+        socket.close();
+        return;
+      }
+      const userId = currentUserId();
+      if (!Number.isInteger(userId) || userId <= 0) return alert("Enter a positive current user ID.");
+      const protocol = location.protocol === "https:" ? "wss" : "ws";
+      socket = new WebSocket(`${protocol}://${location.host}/ws/${userId}`);
+      socket.onopen = () => setConnection(true);
+      socket.onclose = () => { setConnection(false); socket = null; };
+      socket.onerror = () => logWs("Connection error", { user_id: userId });
+      socket.onmessage = (event) => {
+        const payload = JSON.parse(event.data);
+        logWs("Received", payload);
+        if (payload.type === "NEW_MESSAGE_NOTIFICATION" && socket?.readyState === WebSocket.OPEN) {
+          const acknowledgment = { type: "DELIVERED", message_id: payload.message.id };
+          socket.send(JSON.stringify(acknowledgment));
+          logWs("Sent automatic acknowledgment", acknowledgment);
+        }
+      };
+    });
+
+    async function apiRequest(label, url, options = {}) {
+      try {
+        const response = await fetch(url, { headers: { "Content-Type": "application/json" }, ...options });
+        const data = await response.json();
+        logApi(`${label} — HTTP ${response.status}`, data);
+        return data;
+      } catch (error) {
+        logApi(`${label} failed`, { error: error.message });
+      }
+    }
+
+    byId("sendButton").addEventListener("click", async () => {
+      const payload = {
+        sender_id: currentUserId(),
+        receiver_id: Number(byId("receiverId").value),
+        content: byId("content").value,
+      };
+      const result = await apiRequest("Send message", "/api/messages", { method: "POST", body: JSON.stringify(payload) });
+      if (result?.message) byId("content").value = "";
+    });
+    byId("messagesButton").addEventListener("click", () => apiRequest("Fetch messages", `/api/messages/${currentUserId()}`));
+    byId("notificationsButton").addEventListener("click", () => apiRequest("Fetch notifications", `/api/notifications/${currentUserId()}`));
+    byId("clearButton").addEventListener("click", () => { byId("wsLog").textContent = ""; byId("apiLog").textContent = ""; });
+  </script>
+</body>
+</html>
+

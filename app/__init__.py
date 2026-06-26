@@ -1,0 +1,2 @@
+"""FastAPI messaging MVP package."""
+
